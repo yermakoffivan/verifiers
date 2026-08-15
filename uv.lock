@@ -4894,6 +4894,14 @@ wheels = [
 ]
 
 [[package]]
+name = "tool-interception"
+version = "0.1.0"
+source = { editable = "environments/tool_interception" }
+dependencies = [
+    { name = "verifiers" },
+]
+
+[[package]]
 name = "tqdm"
 version = "4.68.4"
 source = { registry = "https://pypi.org/simple" }
@@ -5174,6 +5182,7 @@ examples = [
     { name = "proposer-solver" },
     { name = "reverse-text" },
     { name = "scratchpad" },
+    { name = "tool-interception" },
     { name = "web-search-interception" },
     { name = "wiki-search" },
     { name = "wordle" },

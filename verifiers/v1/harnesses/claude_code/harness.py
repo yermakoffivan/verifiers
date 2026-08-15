@@ -7,7 +7,9 @@ from pydantic import Field
 from verifiers.v1.acp import ACPConfig, ACPHarness
 from verifiers.v1.clients import ModelContext
 from verifiers.v1.configs.harness import HarnessConfig
+from verifiers.v1.errors import HarnessError
 from verifiers.v1.harnesses.node import NODE_BIN_DIR, ensure_node
+from verifiers.v1.interception.tool import TOOL_HOOK_SCRIPT, tool_hook_env
 from verifiers.v1.runtimes import Runtime
 from verifiers.v1.task import TaskData
 from verifiers.v1.trace import Trace
@@ -40,6 +42,7 @@ class ClaudeCodeHarness(ACPHarness[ClaudeCodeHarnessConfig]):
     APPENDS_SYSTEM_PROMPT = True
     SUPPORTS_MCP = True
     SUPPORTS_SKILLS = True
+    SUPPORTS_TOOL_INTERCEPTION = True
 
     async def setup(self, runtime: Runtime) -> None:
         await self.install_skills(runtime, SKILLS_DIR)
@@ -111,6 +114,44 @@ class ClaudeCodeHarness(ACPHarness[ClaudeCodeHarnessConfig]):
             prompt=prompt or "",
             session_meta=session_meta,
         )
+
+    async def configure_tool_interception(
+        self,
+        config: ACPConfig,
+        trace: Trace,
+        runtime: Runtime,
+        url: str,
+        secret: str,
+    ) -> None:
+        if self.config.version != "2.1.223":
+            raise HarnessError(
+                "Claude Code tool interception is verified only for version 2.1.223"
+            )
+        config_dir = self.config_dir(trace)
+        config.env.update(tool_hook_env(url, secret))
+        await self.install_skills(runtime, f"{config_dir}/skills")
+        handler = {
+            "type": "command",
+            "command": f"{NODE_BIN_DIR}/node",
+            "args": ["--input-type=module", "--eval", TOOL_HOOK_SCRIPT, "claude"],
+            "timeout": 35,
+        }
+        hooks = {
+            "disableAllHooks": False,
+            "hooks": {
+                event: [{"hooks": [handler]}]
+                for event in ("PreToolUse", "PostToolUse", "PostToolUseFailure")
+            },
+        }
+        assert config.session_meta is not None
+        claude = config.session_meta["claudeCode"]
+        assert isinstance(claude, dict)
+        options = claude["options"]
+        assert isinstance(options, dict)
+        options["settings"] = hooks
+        # claude-agent-acp otherwise includes project/local sources, which lets the task
+        # merge its own native hooks into this credential-bearing process.
+        options["settingSources"] = ["user"]
 
     async def cleanup(self, trace: Trace, runtime: Runtime) -> None:
         result = await runtime.run(["rm", "-rf", self.config_dir(trace)], {})

@@ -10,7 +10,7 @@ REWRITE_COMMAND = f"git --version && touch {REWRITE_SENTINEL}"
 
 def command(message: vf.AssistantMessage, snippet: str) -> vf.ToolCall | None:
     for call in message.tool_calls or []:
-        if call.name != "bash":
+        if call.name.lower() != "bash":
             continue
         try:
             arguments = json.loads(call.arguments)

@@ -130,6 +130,8 @@ class TraceTask(BaseModel, Generic[DataT]):
 
 class InterceptRecord(BaseModel):
     handler: str
+    boundary: Literal["request", "tool"] = "request"
+    phase: Literal["before", "after"] | None = None
 
 
 class Reward(BaseModel):
@@ -376,7 +378,7 @@ class Trace(BaseModel, Generic[DataT, StateT, AgentConfigT]):
     calls: list[ModelCall] = Field(default_factory=list)
     """Every model call; automatically recorded at intercept time + linked into `nodes`."""
     request_rewrites: list[InterceptRecord] = Field(default_factory=list)
-    """Request changes made by `@intercept`, in execution order."""
+    """Request changes made by `@intercept`, including native tool-hook rewrites."""
     response_rewrites: list[InterceptRecord] = Field(default_factory=list)
     """Response changes made by `@intercept`, in execution order."""
 

@@ -21,7 +21,7 @@ from pydantic import TypeAdapter
 from verifiers.v1 import graph
 from verifiers.v1.clients import Client, ModelContext
 from verifiers.v1.configs.runtime import NetworkPolicyConfig
-from verifiers.v1.errors import RolloutError, TaskError
+from verifiers.v1.errors import HarnessError, RolloutError, TaskError
 from verifiers.v1.trace import InterceptRecord, Trace
 from verifiers.v1.types import (
     AssistantMessage,
@@ -117,6 +117,9 @@ class RolloutSession:
     (and may swallow it, or exit non-zero), so the rollout re-raises this original error once the
     harness returns — recording the real `ProviderError` instead of a secondary `HarnessError`.
     Reset before each model turn, so a successful retry clears it."""
+    fatal_error: "RolloutError | None" = None
+    """A tool-boundary failure. Unlike retryable model errors, a later model call cannot
+    clear it because the native agent may continue after rejecting a tool permission."""
     last_request: bytes | None = None
     """Digest of the most recently served request body. Together with `last_response`, this
     replays the common SDK retry of the latest completed exchange without re-sampling it."""
@@ -133,6 +136,14 @@ class RolloutSession:
     its client disconnects, so a request whose program died at teardown would keep driving
     the exchange (upstream call, simulator turn) — unregistering cancels these instead."""
     prepared_tool_results: dict[str, ToolMessage] = field(default_factory=dict)
+    blocked_tool_calls: set[str] = field(default_factory=set)
+    """Calls vetoed before execution; a later successful post hook is a harness violation."""
+    seen_before_tool_calls: set[str] = field(default_factory=set)
+    """Calls that crossed the synchronous pre-execution hook."""
+    tool_interception_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, repr=False
+    )
+    """Native agents may finish sibling tools concurrently; serialize trace mutation."""
     prepared_users: Counter[str] = field(default_factory=Counter)
 
     @property
@@ -140,17 +151,22 @@ class RolloutSession:
         return self.trace.stop_condition is not None
 
     async def rewrite_request(
-        self, request: Request, *, run_stops: bool = True
+        self,
+        request: Request,
+        *,
+        run_stops: bool = True,
+        tool_boundary: bool = False,
     ) -> tuple[Request, list[InterceptRecord], str | None]:
         """Run typed request interceptors and stops over one canonical request."""
         if not self.request_interceptors and (not run_stops or not self.request_stops):
             return request, [], None
+        current = request
         turn = graph.prepare_turn(self.trace, request.messages)
         prepared_users = self.prepared_users.copy()
         prepared: set[int] = set()
         candidates: set[int] = set()
-        for position in range(turn.tail_start, len(request.messages)):
-            message = request.messages[position]
+        for position in range(turn.tail_start, len(current.messages)):
+            message = current.messages[position]
             if isinstance(message, UserMessage):
                 candidates.add(position)
                 key = graph.message_hash(message)
@@ -158,12 +174,22 @@ class RolloutSession:
                     prepared_users[key] -= 1
                     prepared.add(position)
             elif isinstance(message, ToolMessage):
-                candidates.add(position)
-                if self.prepared_tool_results.get(message.tool_call_id) == message:
+                is_prepared = message.tool_call_id in self.prepared_tool_results
+                if tool_boundary or is_prepared:
+                    candidates.add(position)
+                if is_prepared:
                     prepared.add(position)
-        already_intercepted = candidates and candidates == prepared
+        if not candidates:
+            return request, [], None
+        already_intercepted = candidates == prepared
+        if already_intercepted and all(
+            isinstance(current.messages[position], ToolMessage)
+            for position in candidates
+        ):
+            # The native hook already ran both interceptors and stops. This request only
+            # commits the result that the harness admitted to its next model turn.
+            return request, [], None
 
-        current = request
         records: list[InterceptRecord] = []
         try:
             interceptors = [] if already_intercepted else self.request_interceptors
@@ -305,8 +331,29 @@ class RolloutSession:
             ) from error
         return response, records, None
 
-    async def handle_tool(self, phase: str, message: ToolMessage) -> dict:
-        """Intercept a harness-owned tool result before the harness records it."""
+    async def handle_tool(
+        self,
+        phase: str,
+        message: ToolMessage,
+        can_rewrite: bool = True,
+    ) -> dict:
+        """Run native tool policy before execution or before the next model turn."""
+        if phase == "after_failure" and message.tool_call_id in self.blocked_tool_calls:
+            return {"action": "allow"}
+        if phase == "after" and message.tool_call_id in self.blocked_tool_calls:
+            raise HarnessError(
+                f"harness executed tool call {message.tool_call_id!r} after its "
+                "pre-execution result was replaced"
+            )
+        if (
+            phase != "before"
+            and message.tool_call_id not in self.seen_before_tool_calls
+        ):
+            raise HarnessError(
+                f"tool call {message.tool_call_id!r} reached a post-execution hook "
+                "without crossing its pre-execution hook"
+            )
+        record_phase = "after" if phase == "after_failure" else phase
         branches = [
             branch
             for branch in self.trace.branches
@@ -329,19 +376,34 @@ class RolloutSession:
         previous = [
             self.prepared_tool_results[call.id]
             for call in assistant.tool_calls or []
-            if call.id in self.prepared_tool_results
+            if call.id != message.tool_call_id and call.id in self.prepared_tool_results
         ]
         request, records, stopped = await self.rewrite_request(
             Request(
                 messages=[*branch.messages, *previous, message],
                 tools=self.trace.tools or None,
-            )
+            ),
+            tool_boundary=True,
         )
+        if self.released:
+            raise HarnessError("rollout concluded during tool interception")
         candidate = request.messages[-1]
         assert isinstance(candidate, ToolMessage)
-        self.trace.request_rewrites.extend(records)
+        if candidate != message and not can_rewrite:
+            raise HarnessError(
+                "request interception rewrote a tool result that this harness "
+                "cannot replace"
+            )
+        self.trace.request_rewrites.extend(
+            record.model_copy(update={"boundary": "tool", "phase": record_phase})
+            for record in records
+        )
+        if phase == "before":
+            self.seen_before_tool_calls.add(message.tool_call_id)
         if stopped is not None:
-            committed = request.messages if phase == "after" else request.messages[:-1]
+            committed = (
+                request.messages if record_phase == "after" else request.messages[:-1]
+            )
             turn = graph.prepare_turn(self.trace, committed)
             turn.commit_prompt()
             self.consume_prepared(turn.tail)
@@ -351,6 +413,8 @@ class RolloutSession:
             return {"action": "allow"}
         self.prepared_tool_results[candidate.tool_call_id] = candidate
         if candidate != message:
+            if record_phase == "before":
+                self.blocked_tool_calls.add(candidate.tool_call_id)
             return {
                 "action": "rewrite",
                 "message": candidate.model_dump(exclude_none=True),

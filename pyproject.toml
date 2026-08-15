@@ -93,6 +93,7 @@ examples = [
     "grayscale-interception",
     "bash-interception",
     "web-search-interception",
+    "tool-interception",
 ]
 
 [project.optional-dependencies]
@@ -181,6 +182,7 @@ interception = { path = "environments/interception", editable = true }
 grayscale-interception = { path = "environments/grayscale_interception", editable = true }
 bash-interception = { path = "environments/bash_interception", editable = true }
 web-search-interception = { path = "environments/web_search_interception", editable = true }
+tool-interception = { path = "environments/tool_interception", editable = true }
 
 [tool.uv.exclude-newer-package]
 # Bounded cutoffs for the explicitly requested tool upgrades.

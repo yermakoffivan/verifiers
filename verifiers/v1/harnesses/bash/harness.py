@@ -58,6 +58,7 @@ class BashHarness(Harness[BashHarnessConfig]):
         mcp_urls: dict[str, str],
         data: TaskData,
         tool_interception_url: str | None = None,
+        tool_interception_secret: str | None = None,
     ) -> ProgramResult:
         system_prompt, prompt = self.resolve_prompt(data)
         fragments = [BASH_SYSTEM_PROMPT]
@@ -77,6 +78,8 @@ class BashHarness(Harness[BashHarnessConfig]):
         ]
         if tool_interception_url:
             args.append(f"--tool-interception-url={tool_interception_url}")
+            assert tool_interception_secret is not None
+            args.append(f"--tool-interception-secret={tool_interception_secret}")
         if self.config.edit:
             args.append("--edit")
         if self.config.search:

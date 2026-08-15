@@ -328,6 +328,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--initial-messages-file", default="")
     parser.add_argument("--mcp-config", default="")
     parser.add_argument("--tool-interception-url", default="")
+    parser.add_argument("--tool-interception-secret", default="")
     parser.add_argument("--edit", action="store_true")
     parser.add_argument("--search", action="store_true")
     parser.add_argument("--serper-key", default="")
@@ -390,7 +391,7 @@ async def main() -> None:
                 decision = await run_tool_hook(
                     tool_client,
                     args.tool_interception_url,
-                    args.api_key,
+                    args.tool_interception_secret,
                     "before",
                     tool_message,
                 )
@@ -433,7 +434,7 @@ async def main() -> None:
                 decision = await run_tool_hook(
                     tool_client,
                     args.tool_interception_url,
-                    args.api_key,
+                    args.tool_interception_secret,
                     "after",
                     tool_message,
                 )

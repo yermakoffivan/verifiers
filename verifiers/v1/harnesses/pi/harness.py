@@ -10,7 +10,9 @@ from pydantic import Field
 from verifiers.v1.acp import ACPConfig, ACPHarness
 from verifiers.v1.clients import ModelContext
 from verifiers.v1.configs.harness import HarnessConfig
+from verifiers.v1.errors import HarnessError
 from verifiers.v1.harnesses.node import NODE_BIN_DIR, ensure_node
+from verifiers.v1.interception.tool import install_tool_hook
 from verifiers.v1.runtimes import Runtime
 from verifiers.v1.task import TaskData
 from verifiers.v1.trace import Trace
@@ -60,6 +62,7 @@ class PiHarness(ACPHarness[PiHarnessConfig]):
     # Pi's project skill discovery is trust-gated (a prompt print mode can't answer),
     # so the installed skills are passed explicitly via `--skill` at launch.
     SUPPORTS_SKILLS = True
+    SUPPORTS_TOOL_INTERCEPTION = True
 
     async def setup(self, runtime: Runtime) -> None:
         await self.install_skills(runtime, SKILLS_DIR)
@@ -203,3 +206,30 @@ class PiHarness(ACPHarness[PiHarnessConfig]):
             # Pi can end after its final tool completes without a text message.
             allow_empty_tool_reply=True,
         )
+
+    async def configure_tool_interception(
+        self,
+        config: ACPConfig,
+        trace: Trace,
+        runtime: Runtime,
+        url: str,
+        secret: str,
+    ) -> None:
+        if self.config.version != "0.84.0":
+            raise HarnessError(
+                "Pi tool interception is verified only for version 0.84.0"
+            )
+        agent_dir = config.env["PI_CODING_AGENT_DIR"]
+        hook_path = f"{agent_dir}/tool-hook.mjs"
+        config.env.update(await install_tool_hook(runtime, hook_path, url, secret))
+        wrapper = f"{agent_dir}/pi-intercept"
+        command = shlex.join(
+            [config.env["PI_ACP_PI_COMMAND"], "--extension", hook_path]
+        )
+        await runtime.write(wrapper, f'#!/bin/sh\nexec {command} "$@"\n'.encode())
+        chmod = await runtime.run(["chmod", "+x", wrapper], {})
+        if chmod.exit_code != 0:
+            raise RuntimeError(
+                f"failed to make Pi hook wrapper executable: {chmod.stderr.strip()[-500:]}"
+            )
+        config.env["PI_ACP_PI_COMMAND"] = wrapper
